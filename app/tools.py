@@ -116,6 +116,9 @@ def generate_match_simulation(
 def _generate_minute_by_minute(home_team: str, away_team: str, 
                                home_strength: float) -> list:
     """Generuje dane minuta po minucie"""
+    from app.llm_service import get_llm_service
+    llm = get_llm_service()
+    
     minutes = []
     
     home_score = 0
@@ -146,6 +149,21 @@ def _generate_minute_by_minute(home_team: str, away_team: str,
         "full_time": ["Koniec meczu!", "Sędzia kończy spotkanie!"]
     }
     
+    def get_ai_commentary(event_desc: str) -> str:
+        """Helper do generowania komentarza AI"""
+        try:
+            prompt = (f"Napisz jedno krótkie, emocjonalne zdanie komentujące {event_desc} w meczu {home_team} vs {away_team}. "
+                      f"Nie używaj cudzysłowów. Pisz po polsku.")
+
+            response = llm.generate(prompt, use_functions=False, temperature=0.3)
+            content = response.get("content", "").strip()
+            # Czasem modele zwracają cudzysłowy, usuwamy je
+            content = content.replace('"', '').replace("'", "")
+            return content if content else event_desc
+        except Exception as e:
+            logger.warning("ai_commentary_failed", error=str(e))
+            return event_desc
+
     for minute in range(0, 91):
         events = []
         commentary = ""
@@ -173,41 +191,39 @@ def _generate_minute_by_minute(home_team: str, away_team: str,
                     home_score += 1
                     home_shots_ot += 1
                     home_shots += 1
-                    commentary = random.choice(commentaries["goal_home"])
+                    desc = f"Gol dla {home_team}!"
+                    # UŻYCIE AI DO KOMENTARZA GOLA
+                    commentary = get_ai_commentary(desc)
                     events.append(MatchEvent(minute=minute, event_type=MatchEventType.GOAL,
-                                           team=home_team, description=f"Gol dla {home_team}!"))
+                                           team=home_team, description=desc))
                 else:
                     away_score += 1
                     away_shots_ot += 1
                     away_shots += 1
-                    commentary = random.choice(commentaries["goal_away"])
+                    desc = f"Gol dla {away_team}!"
+                    # UŻYCIE AI DO KOMENTARZA GOLA
+                    commentary = get_ai_commentary(desc)
                     events.append(MatchEvent(minute=minute, event_type=MatchEventType.GOAL,
-                                           team=away_team, description=f"Gol dla {away_team}!"))
+                                           team=away_team, description=desc))
             # Strzał
             elif rand < 0.15:
                 if random.random() < home_strength:
                     home_shots += 1
-                    if random.random() < 0.4:
-                        home_shots_ot += 1
+                    if random.random() < 0.4: home_shots_ot += 1
                     commentary = random.choice(commentaries["attack_home"])
                 else:
                     away_shots += 1
-                    if random.random() < 0.4:
-                        away_shots_ot += 1
+                    if random.random() < 0.4: away_shots_ot += 1
                     commentary = random.choice(commentaries["attack_away"])
             # Rzut rożny
             elif rand < 0.22:
-                if random.random() < home_strength:
-                    home_corners += 1
-                else:
-                    away_corners += 1
+                if random.random() < home_strength: home_corners += 1
+                else: away_corners += 1
                 commentary = "Rzut rożny."
             # Faul
             elif rand < 0.30:
-                if random.random() < 0.5:
-                    home_fouls += 1
-                else:
-                    away_fouls += 1
+                if random.random() < 0.5: home_fouls += 1
+                else: away_fouls += 1
                 commentary = "Faul w środku pola."
                 # Żółta kartka (20% fauli)
                 if random.random() < 0.2:

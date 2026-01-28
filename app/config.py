@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     top_k_retrieval: int = 5
     
     # Security
-    timeout_seconds: int = 30
+    timeout_seconds: int = 180
     max_input_length: int = 2000
     max_output_tokens: int = 4096
     
@@ -40,11 +40,17 @@ class Settings(BaseSettings):
     debug_mode: bool = False
     
     # Data paths
+    # Data paths
     match_data_path: str = "./DANE"
+    
+    # Rate Limiting
+    rate_limit_requests: int = 100
+    rate_limit_duration: int = 60
     
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 @lru_cache()

@@ -91,21 +91,43 @@ class GeminiProvider(BaseLLMProvider):
 
 
 class LocalLLMProvider(BaseLLMProvider):
-    """Lokalny stub LLM - symuluje function-calling"""
+    """LLM (Qwen2.5-3B)"""
     
     def __init__(self):
         self.settings = get_settings()
         self.known_teams = ["Arsenal", "Aston Villa", "Bournemouth", "Brighton", "Chelsea",
                            "Crystal Palace", "Everton", "Fulham", "Liverpool", "Manchester City",
                            "Manchester United", "Newcastle", "Tottenham", "West Ham", "Wolves"]
+        self.model = None
+        self.tokenizer = None
         
     def is_available(self) -> bool:
         return self.settings.local_llm_enabled
-    
+        
+    def _load_model(self):
+        if self.model is None:
+            try:
+                from transformers import AutoModelForCausalLM, AutoTokenizer
+                import torch
+                
+                model_name = "Qwen/Qwen2.5-3B-Instruct"
+                logger.info("loading_local_llm", model=model_name)
+                
+                self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_name,
+                    torch_dtype=torch.float32, # CPU friendly
+                    device_map="cpu"
+                )
+            except Exception as e:
+                logger.error("local_llm_load_failed", error=str(e))
+                raise e
+
     def generate(self, prompt: str, functions: Optional[List[dict]] = None,
-                 system_prompt: Optional[str] = None) -> Dict[str, Any]:
+                 system_prompt: Optional[str] = None, temperature: float = 0.7) -> Dict[str, Any]:
         prompt_lower = prompt.lower()
         
+
         if functions:
             if any(kw in prompt_lower for kw in ["symul", "mecz", "match", "generate"]):
                 teams = self._extract_teams(prompt)
@@ -123,7 +145,40 @@ class LocalLLMProvider(BaseLLMProvider):
                 return {"function_call": {"name": "search_matches",
                         "arguments": json.dumps({"query": prompt[:100], "top_k": 5})}}
         
-        return {"content": "Podaj nazwy drużyn do symulacji meczu."}
+
+        self._load_model()
+        
+        messages = [
+            {"role": "system", "content": system_prompt or "You are a helpful assistant."},
+            {"role": "user", "content": prompt}
+        ]
+        
+        text = self.tokenizer.apply_chat_template(
+            messages, 
+            tokenize=False, 
+            add_generation_prompt=True
+        )
+        
+        inputs = self.tokenizer([text], return_tensors="pt").to(self.model.device)
+        
+        outputs = self.model.generate(
+            **inputs, 
+            max_new_tokens=128,      
+            do_sample=True,
+            temperature=temperature, 
+            top_p=0.9,
+            repetition_penalty=1.2   
+        )
+        
+        response_text = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+        
+
+        if "assistant" in response_text:
+            response_text = response_text.split("assistant")[-1].strip()
+        elif "system" in response_text and "user" in response_text:
+            response_text = response_text.rsplit("user", 1)[-1].strip()
+
+        return {"content": response_text}
     
     def _extract_teams(self, text: str) -> List[str]:
         found = []
@@ -155,10 +210,16 @@ Generujesz realistyczne symulacje meczów na podstawie danych historycznych."""
         return self.providers["local"]
     
     def generate(self, prompt: str, mode: str = "auto", use_functions: bool = True,
-                 custom_functions: Optional[List[dict]] = None) -> Dict[str, Any]:
+                 custom_functions: Optional[List[dict]] = None, temperature: float = 0.7) -> Dict[str, Any]:
         provider = self.get_provider(mode)
         functions = custom_functions or FUNCTION_SCHEMAS if use_functions else None
-        return provider.generate(prompt, functions, self.system_prompt)
+        
+        # OpenAI/Gemini mogą nie mieć tego parametru w interfejsie BaseLLMProvider (tu upraszczamy)
+        # Ale LocalLLMProvider ma.
+        if isinstance(provider, LocalLLMProvider):
+             return provider.generate(prompt, functions, self.system_prompt, temperature=temperature)
+        else:
+             return provider.generate(prompt, functions, self.system_prompt)
 
 
 _llm_service: Optional[LLMService] = None

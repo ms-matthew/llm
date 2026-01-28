@@ -21,8 +21,8 @@ Najszybszy sposób na uruchomienie w izolowanym środowisku.
 
 1.  **Pobierz projekt:**
     ```bash
-    git clone <ADRES_TWOJEGO_REPOZYTORIUM>
-    cd football-simulation
+    git clone https://github.com/ms-matthew/llm.git
+    cd llm
     ```
 
 2.  **Skonfiguruj środowisko:**
