@@ -16,7 +16,7 @@ from app.config import get_settings
 from app.schemas import (AskRequest, GenerateMatchRequest, GenerateBatchRequest,
                          APIResponse, ErrorResponse)
 from app.guardrails import (detect_prompt_injection, validate_request, 
-                            check_rate_limit, sanitize_output)
+                            check_rate_limit, sanitize_output, validate_json_output)
 from app.llm_service import get_llm_service
 from app.rag_service import get_rag_service
 from app.tools import dispatcher, registry
@@ -166,7 +166,7 @@ Odpowiedz na pytanie używając dostępnych narzędzi jeśli to potrzebne."""
         
         result = {"answer": response.get("content", ""), "meta": rag_meta}
         
-        # Jeśli jest function call - wykonaj
+        # Jeśli jest function call - wykonaj i finalizuj odpowiedź przez LLM
         if "function_call" in response:
             fc = response["function_call"]
             tool_name = fc["name"]
@@ -176,11 +176,31 @@ Odpowiedz na pytanie używając dostępnych narzędzi jeśli to potrzebne."""
                 arguments = {}
             
             tool_result = dispatcher.dispatch(tool_name, arguments)
+            
+            # FINALIZACJA: Wysyłamy wynik narzędzia do LLM aby sfinalizować odpowiedź
+            finalization_prompt = f"""Użytkownik zapytał: {sanitized}
+
+Wykonano narzędzie: {tool_name}
+Wynik narzędzia:
+{json.dumps(tool_result, ensure_ascii=False, indent=2)}
+
+Na podstawie wyniku narzędzia, odpowiedz użytkownikowi w sposób zrozumiały i pomocny."""
+            
+            final_response = llm.generate(finalization_prompt, mode=mode, use_functions=False)
+            
+            result["answer"] = final_response.get("content", "")
             result["tool"] = tool_name
             result["tool_output"] = tool_result
             metrics.record_request(True, time.time() - start_time, tool_name)
         else:
             metrics.record_request(True, time.time() - start_time)
+        
+        # OUTPUT VALIDATION: Walidacja i sanityzacja output
+        is_valid_json, validated_data = validate_json_output(result)
+        if is_valid_json and isinstance(validated_data, dict):
+            result = sanitize_output(validated_data)
+        else:
+            result = sanitize_output(result)
         
         logger.info("ask_complete", latency=time.time() - start_time)
         return APIResponse(status="ok", data=result, meta=rag_meta)
@@ -190,11 +210,11 @@ Odpowiedz na pytanie używając dostępnych narzędzi jeśli to potrzebne."""
         import traceback
         trace = traceback.format_exc()
         logger.error("ask_error", error=str(e), traceback=trace)
-        # return debugging info
+        # SECURITY: Nie zwracamy stacktrace do klienta
         return JSONResponse(
             status_code=500,
             content={"status": "error", "error_type": "internal_error", 
-                     "message": f"{str(e)}\n{trace}"}
+                     "message": "Wystąpił błąd wewnętrzny. Spróbuj ponownie później."}
         )
 
 
@@ -218,7 +238,7 @@ async def generate_single_match(request: GenerateMatchRequest):
     except Exception as e:
         metrics.record_request(False, time.time() - start_time)
         logger.error("generate_match_error", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Błąd podczas generowania symulacji meczu")
 
 
 @app.post("/generate/batch")
@@ -244,7 +264,8 @@ async def generate_batch_matches(request: GenerateBatchRequest):
         
     except Exception as e:
         metrics.record_request(False, time.time() - start_time)
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("generate_batch_error", error=str(e))
+        raise HTTPException(status_code=500, detail="Błąd podczas generowania partii meczów")
 
 
 @app.get("/teams")
@@ -293,11 +314,13 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 async def general_exception_handler(request: Request, exc: Exception):
     import traceback
     trace = traceback.format_exc()
+    # Logujemy pełny traceback tylko do logów, NIE do klienta
     logger.error("unhandled_exception", error=str(exc), traceback=trace)
+    # SECURITY: Zwracamy ogólny komunikat bez stacktrace
     return JSONResponse(
         status_code=500,
         content={"status": "error", "error_type": "internal_error", 
-                 "message": f"{str(exc)}\n{trace}"}
+                 "message": "Wystąpił nieoczekiwany błąd. Spróbuj ponownie później."}
     )
 
 
